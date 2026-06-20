@@ -7,6 +7,8 @@ from database.db import create_pool, close_pool
 import os
 import sys
 import atexit
+import time
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,6 +65,8 @@ class AdaptBot(commands.Bot):
             help_command=None,
             owner_ids=set(config.OWNER_IDS),
         )
+        self.start_time = time.time()
+
 
     async def _get_prefix(self, bot, message: discord.Message):
         if not message.guild:
@@ -135,29 +139,90 @@ class AdaptBot(commands.Bot):
         await super().close()
 
 
-def start_health_check():
+def start_health_check(bot):
     import threading
+    import json
+    import platform
+    import psutil
     from http.server import SimpleHTTPRequestHandler
     from socketserver import TCPServer
+    from utils.dashboard_template import DASHBOARD_HTML
 
-    class HealthCheckHandler(SimpleHTTPRequestHandler):
+    class DashboardHandler(SimpleHTTPRequestHandler):
         def do_GET(self):
-            self.send_response(200)
-            self.send_header("Content-type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"OK")
+            if self.path == "/dashboard" or self.path == "/":
+                self.send_response(200)
+                self.send_header("Content-type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(DASHBOARD_HTML.encode("utf-8"))
+            elif self.path == "/api/stats":
+                self.send_response(200)
+                self.send_header("Content-type", "application/json")
+                self.end_headers()
+                
+                # Uptime calculation
+                uptime = time.time() - bot.start_time
+                
+                # Database check
+                db_connected = False
+                if hasattr(bot, "db_pool") and bot.db_pool is not None:
+                    # check pool status
+                    db_connected = not bot.db_pool.is_closed() if hasattr(bot.db_pool, "is_closed") else True
+
+                # Cogs loading status
+                cogs_status = {}
+                all_cogs = [
+                    "cogs.general", "cogs.utility", "cogs.settings", 
+                    "cogs.moderation", "cogs.welcome", "cogs.logging", 
+                    "cogs.leveling", "cogs.economy", "cogs.tickets", 
+                    "cogs.automod", "cogs.roles", "cogs.customcmds", 
+                    "cogs.developer", "cogs.games", "cogs.giveaway"
+                ]
+                for cog in all_cogs:
+                    cogs_status[cog] = cog in bot.extensions
+
+                # Memory usage
+                process = psutil.Process(os.getpid())
+                mem_rss = process.memory_info().rss / (1024 * 1024) # MB
+                mem_percent = psutil.virtual_memory().percent
+
+                stats = {
+                    "bot_name": bot.user.name if bot.user else "Adapt Bot",
+                    "latency_ms": bot.latency * 1000 if bot.latency is not None else 0,
+                    "server_count": len(bot.guilds),
+                    "member_count": sum(g.member_count for g in bot.guilds if g.member_count),
+                    "uptime_seconds": uptime,
+                    "database_connected": db_connected,
+                    "cpu_usage_percent": psutil.cpu_percent(),
+                    "memory_usage_percent": round(mem_percent, 1),
+                    "memory_usage_mb": round(mem_rss, 1),
+                    "pid": os.getpid(),
+                    "python_version": platform.python_version(),
+                    "os": platform.system() + " " + platform.release(),
+                    "cogs": cogs_status
+                }
+                
+                self.wfile.write(json.dumps(stats).encode("utf-8"))
+            else:
+                self.send_response(200)
+                self.send_header("Content-type", "text/plain")
+                self.end_headers()
+                self.wfile.write(b"OK")
 
         def log_message(self, format, *args):
             return
 
     port = int(os.environ.get("PORT", 8080))
     try:
-        server = TCPServer(("0.0.0.0", port), HealthCheckHandler)
+        server = TCPServer(("0.0.0.0", port), DashboardHandler, bind_and_activate=False)
+        server.allow_reuse_address = True
+        server.server_bind()
+        server.server_activate()
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
-        log.info(f"⚡ Started health check server on port {port}")
+        log.info(f"⚡ Started health check & dashboard server on port {port}")
     except Exception as e:
-        log.error(f"❌ Failed to start health check server: {e}")
+        log.error(f"❌ Failed to start dashboard server: {e}")
 
 
 async def main():
@@ -165,12 +230,12 @@ async def main():
         log.critical("DISCORD_TOKEN is not set.")
         return
     async with AdaptBot() as bot:
+        start_health_check(bot)
         await bot.start(config.TOKEN)
 
 
 if __name__ == "__main__":
     acquire_lock()
     atexit.register(release_lock)
-    start_health_check()
     asyncio.run(main())
 

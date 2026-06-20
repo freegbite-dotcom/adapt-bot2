@@ -135,6 +135,31 @@ class AdaptBot(commands.Bot):
         await super().close()
 
 
+def start_health_check():
+    import threading
+    from http.server import SimpleHTTPRequestHandler
+    from socketserver import TCPServer
+
+    class HealthCheckHandler(SimpleHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"OK")
+
+        def log_message(self, format, *args):
+            return
+
+    port = int(os.environ.get("PORT", 8080))
+    try:
+        server = TCPServer(("0.0.0.0", port), HealthCheckHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        log.info(f"⚡ Started health check server on port {port}")
+    except Exception as e:
+        log.error(f"❌ Failed to start health check server: {e}")
+
+
 async def main():
     if not config.TOKEN:
         log.critical("DISCORD_TOKEN is not set.")
@@ -146,4 +171,6 @@ async def main():
 if __name__ == "__main__":
     acquire_lock()
     atexit.register(release_lock)
+    start_health_check()
     asyncio.run(main())
+

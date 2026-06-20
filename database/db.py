@@ -54,8 +54,55 @@ def get_pool() -> asyncpg.Pool:
 
 
 # ── Guild Settings ────────────────────────────────────────────────────────────
+import json
+import os
 
-AUTOMOD_DEFAULTS = {
+LOCAL_SETTINGS_FILE = "database/local_settings.json"
+
+def _load_local_settings() -> dict:
+    if os.path.exists(LOCAL_SETTINGS_FILE):
+        try:
+            with open(LOCAL_SETTINGS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def _save_local_settings(data: dict):
+    try:
+        os.makedirs(os.path.dirname(LOCAL_SETTINGS_FILE), exist_ok=True)
+        with open(LOCAL_SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+    except Exception as e:
+        log.error(f"Failed to save local settings: {e}")
+
+GUILD_DEFAULTS = {
+    "prefix": ".",
+    "leveling_enabled": True,
+    "xp_cooldown": 60,
+    "xp_min": 15,
+    "xp_max": 25,
+    "level_up_message": "🎉 {user} has reached level {level}!",
+    "level_up_channel_id": None,
+    "economy_enabled": True,
+    "currency_name": "coins",
+    "currency_emoji": "🪙",
+    "daily_amount": 100,
+    "ticket_category_id": None,
+    "ticket_support_role_id": None,
+    "ticket_enabled": True,
+    "log_channel_id": None,
+    "mod_log_channel_id": None,
+    "automod_enabled": False,
+    "automod_spam": False,
+    "automod_links": False,
+    "automod_badwords": False,
+    "automod_badwords_list": [],
+    "automod_log_channel_id": None,
+    "giveaway_emoji": "🎉",
+    "giveaway_color": 5869821,
+    "giveaway_ping_role_id": None,
+    "giveaway_pin": False,
     "automod_spam_count": 5,
     "automod_spam_interval": 5,
     "automod_spam_action": "timeout",
@@ -72,14 +119,21 @@ AUTOMOD_DEFAULTS = {
 
 async def get_guild(guild_id: int) -> dict | None:
     if _pool is None:
-        return None
+        local_data = _load_local_settings()
+        guild_key = str(guild_id)
+        g_data = {"guild_id": guild_id}
+        g_data.update(GUILD_DEFAULTS)
+        if guild_key in local_data:
+            g_data.update(local_data[guild_key])
+        return g_data
+
     row = await get_pool().fetchrow("SELECT * FROM guild_settings WHERE guild_id = $1", guild_id)
     if not row:
         return None
     
     # Merge row with default settings so that missing keys don't trigger KeyError
     data = dict(row)
-    for k, v in AUTOMOD_DEFAULTS.items():
+    for k, v in GUILD_DEFAULTS.items():
         if k not in data or data[k] is None:
             data[k] = v
     return data
@@ -87,7 +141,7 @@ async def get_guild(guild_id: int) -> dict | None:
 async def ensure_guild(guild_id: int) -> dict:
     """Get guild settings, creating a default row if it doesn't exist."""
     row = await get_guild(guild_id)
-    if not row:
+    if _pool is not None and not row:
         await get_pool().execute(
             "INSERT INTO guild_settings (guild_id) VALUES ($1) ON CONFLICT DO NOTHING", guild_id
         )
@@ -98,6 +152,15 @@ async def set_guild(guild_id: int, **kwargs) -> None:
     """Update one or more guild_settings columns."""
     if not kwargs:
         return
+    if _pool is None:
+        local_data = _load_local_settings()
+        guild_key = str(guild_id)
+        if guild_key not in local_data:
+            local_data[guild_key] = {}
+        local_data[guild_key].update(kwargs)
+        _save_local_settings(local_data)
+        return
+
     cols = ", ".join(f"{k} = ${i+2}" for i, k in enumerate(kwargs))
     await get_pool().execute(
         f"UPDATE guild_settings SET {cols} WHERE guild_id = $1",
@@ -105,10 +168,9 @@ async def set_guild(guild_id: int, **kwargs) -> None:
     )
 
 async def get_prefix(guild_id: int) -> str:
-    if _pool is None:
-        return config.PREFIX
     row = await get_guild(guild_id)
-    return row["prefix"] if row else config.PREFIX
+    return row["prefix"] if row and "prefix" in row else config.PREFIX
+
 
 
 # ── Mod Logs ──────────────────────────────────────────────────────────────────
@@ -297,6 +359,11 @@ async def add_automod_log(guild_id, user_id, rule, content=None, action_taken=No
 
 async def add_automod_whitelist_role(guild_id: int, role_id: int) -> None:
     if _pool is None:
+        cfg = await get_guild(guild_id)
+        roles = list(cfg.get("automod_whitelist_roles") or [])
+        if role_id not in roles:
+            roles.append(role_id)
+            await set_guild(guild_id, automod_whitelist_roles=roles)
         return
     await get_pool().execute(
         "UPDATE guild_settings SET automod_whitelist_roles = array_append(COALESCE(automod_whitelist_roles, ARRAY[]::BIGINT[]), $2) WHERE guild_id = $1",
@@ -305,6 +372,11 @@ async def add_automod_whitelist_role(guild_id: int, role_id: int) -> None:
 
 async def remove_automod_whitelist_role(guild_id: int, role_id: int) -> None:
     if _pool is None:
+        cfg = await get_guild(guild_id)
+        roles = list(cfg.get("automod_whitelist_roles") or [])
+        if role_id in roles:
+            roles.remove(role_id)
+            await set_guild(guild_id, automod_whitelist_roles=roles)
         return
     await get_pool().execute(
         "UPDATE guild_settings SET automod_whitelist_roles = array_remove(COALESCE(automod_whitelist_roles, ARRAY[]::BIGINT[]), $2) WHERE guild_id = $1",
@@ -313,6 +385,11 @@ async def remove_automod_whitelist_role(guild_id: int, role_id: int) -> None:
 
 async def add_automod_whitelist_channel(guild_id: int, channel_id: int) -> None:
     if _pool is None:
+        cfg = await get_guild(guild_id)
+        channels = list(cfg.get("automod_whitelist_channels") or [])
+        if channel_id not in channels:
+            channels.append(channel_id)
+            await set_guild(guild_id, automod_whitelist_channels=channels)
         return
     await get_pool().execute(
         "UPDATE guild_settings SET automod_whitelist_channels = array_append(COALESCE(automod_whitelist_channels, ARRAY[]::BIGINT[]), $2) WHERE guild_id = $1",
@@ -321,11 +398,17 @@ async def add_automod_whitelist_channel(guild_id: int, channel_id: int) -> None:
 
 async def remove_automod_whitelist_channel(guild_id: int, channel_id: int) -> None:
     if _pool is None:
+        cfg = await get_guild(guild_id)
+        channels = list(cfg.get("automod_whitelist_channels") or [])
+        if channel_id in channels:
+            channels.remove(channel_id)
+            await set_guild(guild_id, automod_whitelist_channels=channels)
         return
     await get_pool().execute(
         "UPDATE guild_settings SET automod_whitelist_channels = array_remove(COALESCE(automod_whitelist_channels, ARRAY[]::BIGINT[]), $2) WHERE guild_id = $1",
         guild_id, channel_id
     )
+
 
 
 

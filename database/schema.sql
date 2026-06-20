@@ -30,10 +30,23 @@ CREATE TABLE IF NOT EXISTS guild_settings (
     -- AutoMod Settings
     automod_enabled BOOLEAN DEFAULT FALSE,
     automod_spam BOOLEAN DEFAULT FALSE,
+    automod_spam_count INT DEFAULT 5,
+    automod_spam_interval INT DEFAULT 5,
+    automod_spam_action VARCHAR(20) DEFAULT 'timeout',
     automod_links BOOLEAN DEFAULT FALSE,
+    automod_links_action VARCHAR(20) DEFAULT 'delete',
+    automod_invites BOOLEAN DEFAULT FALSE,
+    automod_invites_action VARCHAR(20) DEFAULT 'delete',
     automod_badwords BOOLEAN DEFAULT FALSE,
+    automod_badwords_action VARCHAR(20) DEFAULT 'delete',
     automod_badwords_list TEXT[] DEFAULT '{}',
+    automod_mentions BOOLEAN DEFAULT FALSE,
+    automod_mentions_limit INT DEFAULT 5,
+    automod_mentions_action VARCHAR(20) DEFAULT 'delete',
+    automod_whitelist_roles BIGINT[] DEFAULT '{}',
+    automod_whitelist_channels BIGINT[] DEFAULT '{}',
     automod_log_channel_id BIGINT,
+
 
     -- Giveaway Settings
     giveaway_emoji VARCHAR(64) DEFAULT '🎉',

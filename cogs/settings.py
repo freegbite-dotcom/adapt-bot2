@@ -96,13 +96,33 @@ class SettingsView(discord.ui.View):
             embed.add_field(name="Welcome Message",  value=f"```{cfg['ticket_message']}```",    inline=False)
 
         elif category == "automod":
-            embed = info("Auto-Mod Settings")
-            embed.add_field(name="Auto-Mod",    value=bo(cfg["automod_enabled"]), inline=True)
-            embed.add_field(name="Anti-Spam",   value=bo(cfg["automod_spam"]),    inline=True)
-            embed.add_field(name="Anti-Links",  value=bo(cfg["automod_links"]),   inline=True)
-            embed.add_field(name="Bad Words",   value=bo(cfg["automod_badwords"]),inline=True)
+            embed = info("🛡️ Auto-Mod Settings")
+            embed.add_field(name="Status", value=bo(cfg["automod_enabled"]), inline=True)
             embed.add_field(name="Log Channel", value=ch(cfg["automod_log_channel_id"]), inline=True)
-            words = cfg["automod_badwords_list"] or []
+            embed.add_field(name="\u200b", value="\u200b", inline=True) # spacer
+            
+            # Detailed Configs
+            spam_val = f"{bo(cfg['automod_spam'])}\n┕ Threshold: `{cfg['automod_spam_count']}` msgs / `{cfg['automod_spam_interval']}s`\n┕ Action: `{cfg['automod_spam_action']}`"
+            links_val = f"{bo(cfg['automod_links'])}\n┕ Action: `{cfg['automod_links_action']}`"
+            invites_val = f"{bo(cfg['automod_invites'])}\n┕ Action: `{cfg['automod_invites_action']}`"
+            badwords_val = f"{bo(cfg['automod_badwords'])}\n┕ Action: `{cfg['automod_badwords_action']}`"
+            mentions_val = f"{bo(cfg['automod_mentions'])}\n┕ Limit: `{cfg['automod_mentions_limit']}` mentions\n┕ Action: `{cfg['automod_mentions_action']}`"
+            
+            embed.add_field(name="Anti-Spam", value=spam_val, inline=True)
+            embed.add_field(name="Anti-Links", value=links_val, inline=True)
+            embed.add_field(name="Anti-Invites", value=invites_val, inline=True)
+            embed.add_field(name="Bad Words", value=badwords_val, inline=True)
+            embed.add_field(name="Anti-Mentions", value=mentions_val, inline=True)
+            embed.add_field(name="\u200b", value="\u200b", inline=True) # spacer
+
+            # Whitelists
+            wl_roles = [f"<@&{rid}>" for rid in (cfg.get("automod_whitelist_roles") or [])]
+            wl_channels = [f"<#{cid}>" for cid in (cfg.get("automod_whitelist_channels") or [])]
+            
+            embed.add_field(name=f"Whitelisted Roles ({len(wl_roles)})", value=" ".join(wl_roles) if wl_roles else "`None`", inline=False)
+            embed.add_field(name=f"Whitelisted Channels ({len(wl_channels)})", value=" ".join(wl_channels) if wl_channels else "`None`", inline=False)
+            
+            words = cfg.get("automod_badwords_list") or []
             embed.add_field(name=f"Bad Word List ({len(words)})", value=f"`{', '.join(words)}`" if words else "`None`", inline=False)
         elif category == "giveaways":
             giveaway_cog = interaction.client.get_cog("Giveaway")
@@ -340,26 +360,127 @@ class Settings(commands.Cog):
         await db.set_guild(interaction.guild_id, automod_enabled=enabled)
         await interaction.response.send_message(embed=success("Auto-Mod", f"{'Enabled' if enabled else 'Disabled'}"), ephemeral=True)
 
-    @set_automod.command(name="antispam", description="Enable or disable anti-spam.")
+    @set_automod.command(name="antispam", description="Configure anti-spam filter.")
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Delete Only", value="delete"),
+        app_commands.Choice(name="Warn User", value="warn"),
+        app_commands.Choice(name="Timeout User (5m)", value="timeout"),
+        app_commands.Choice(name="Kick User", value="kick"),
+        app_commands.Choice(name="Ban User", value="ban")
+    ])
     @is_admin()
-    async def set_antispam(self, interaction: discord.Interaction, enabled: bool):
+    async def set_antispam(self, interaction: discord.Interaction, enabled: bool, limit: int = None, seconds: int = None, action: str = None):
         await db.ensure_guild(interaction.guild_id)
-        await db.set_guild(interaction.guild_id, automod_spam=enabled)
-        await interaction.response.send_message(embed=success("Anti-Spam", f"{'Enabled' if enabled else 'Disabled'}"), ephemeral=True)
+        updates = {"automod_spam": enabled}
+        if limit is not None:
+            if limit < 1 or limit > 100:
+                return await interaction.response.send_message(embed=error("Invalid Limit", "Limit must be between 1 and 100."), ephemeral=True)
+            updates["automod_spam_count"] = limit
+        if seconds is not None:
+            if seconds < 1 or seconds > 300:
+                return await interaction.response.send_message(embed=error("Invalid Seconds", "Seconds must be between 1 and 300."), ephemeral=True)
+            updates["automod_spam_interval"] = seconds
+        if action is not None:
+            updates["automod_spam_action"] = action
 
-    @set_automod.command(name="antilinks", description="Enable or disable anti-links.")
-    @is_admin()
-    async def set_antilinks(self, interaction: discord.Interaction, enabled: bool):
-        await db.ensure_guild(interaction.guild_id)
-        await db.set_guild(interaction.guild_id, automod_links=enabled)
-        await interaction.response.send_message(embed=success("Anti-Links", f"{'Enabled' if enabled else 'Disabled'}"), ephemeral=True)
+        await db.set_guild(interaction.guild_id, **updates)
+        
+        limit_str = f" limit `{limit or 5}` msgs" if limit else ""
+        sec_str = f" in `{seconds or 5}`s" if seconds else ""
+        act_str = f" with action `{action or 'timeout'}`" if action else ""
+        await interaction.response.send_message(
+            embed=success("Anti-Spam Updated", f"Anti-spam is now **{'Enabled' if enabled else 'Disabled'}**{limit_str}{sec_str}{act_str}."),
+            ephemeral=True
+        )
 
-    @set_automod.command(name="badwords", description="Enable or disable bad word filter.")
+    @set_automod.command(name="antilinks", description="Configure anti-links filter.")
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Delete Only", value="delete"),
+        app_commands.Choice(name="Warn User", value="warn"),
+        app_commands.Choice(name="Timeout User (5m)", value="timeout"),
+        app_commands.Choice(name="Kick User", value="kick"),
+        app_commands.Choice(name="Ban User", value="ban")
+    ])
     @is_admin()
-    async def set_badwords(self, interaction: discord.Interaction, enabled: bool):
+    async def set_antilinks(self, interaction: discord.Interaction, enabled: bool, action: str = None):
         await db.ensure_guild(interaction.guild_id)
-        await db.set_guild(interaction.guild_id, automod_badwords=enabled)
-        await interaction.response.send_message(embed=success("Bad Word Filter", f"{'Enabled' if enabled else 'Disabled'}"), ephemeral=True)
+        updates = {"automod_links": enabled}
+        if action is not None:
+            updates["automod_links_action"] = action
+        await db.set_guild(interaction.guild_id, **updates)
+        act_str = f" with action `{action}`" if action else ""
+        await interaction.response.send_message(
+            embed=success("Anti-Links Updated", f"Anti-links is now **{'Enabled' if enabled else 'Disabled'}**{act_str}."),
+            ephemeral=True
+        )
+
+    @set_automod.command(name="antiinvites", description="Configure anti-invites filter (blocks server invite links).")
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Delete Only", value="delete"),
+        app_commands.Choice(name="Warn User", value="warn"),
+        app_commands.Choice(name="Timeout User (5m)", value="timeout"),
+        app_commands.Choice(name="Kick User", value="kick"),
+        app_commands.Choice(name="Ban User", value="ban")
+    ])
+    @is_admin()
+    async def set_antiinvites(self, interaction: discord.Interaction, enabled: bool, action: str = None):
+        await db.ensure_guild(interaction.guild_id)
+        updates = {"automod_invites": enabled}
+        if action is not None:
+            updates["automod_invites_action"] = action
+        await db.set_guild(interaction.guild_id, **updates)
+        act_str = f" with action `{action}`" if action else ""
+        await interaction.response.send_message(
+            embed=success("Anti-Invites Updated", f"Anti-invites is now **{'Enabled' if enabled else 'Disabled'}**{act_str}."),
+            ephemeral=True
+        )
+
+    @set_automod.command(name="antimentions", description="Configure anti-mass mentions filter.")
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Delete Only", value="delete"),
+        app_commands.Choice(name="Warn User", value="warn"),
+        app_commands.Choice(name="Timeout User (5m)", value="timeout"),
+        app_commands.Choice(name="Kick User", value="kick"),
+        app_commands.Choice(name="Ban User", value="ban")
+    ])
+    @is_admin()
+    async def set_antimentions(self, interaction: discord.Interaction, enabled: bool, limit: int = None, action: str = None):
+        await db.ensure_guild(interaction.guild_id)
+        updates = {"automod_mentions": enabled}
+        if limit is not None:
+            if limit < 1 or limit > 50:
+                return await interaction.response.send_message(embed=error("Invalid Limit", "Limit must be between 1 and 50 mentions."), ephemeral=True)
+            updates["automod_mentions_limit"] = limit
+        if action is not None:
+            updates["automod_mentions_action"] = action
+        await db.set_guild(interaction.guild_id, **updates)
+        limit_str = f" limit `{limit}` mentions" if limit else ""
+        act_str = f" with action `{action}`" if action else ""
+        await interaction.response.send_message(
+            embed=success("Anti-Mentions Updated", f"Anti-mass mentions is now **{'Enabled' if enabled else 'Disabled'}**{limit_str}{act_str}."),
+            ephemeral=True
+        )
+
+    @set_automod.command(name="badwords", description="Configure bad word filter.")
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Delete Only", value="delete"),
+        app_commands.Choice(name="Warn User", value="warn"),
+        app_commands.Choice(name="Timeout User (5m)", value="timeout"),
+        app_commands.Choice(name="Kick User", value="kick"),
+        app_commands.Choice(name="Ban User", value="ban")
+    ])
+    @is_admin()
+    async def set_badwords(self, interaction: discord.Interaction, enabled: bool, action: str = None):
+        await db.ensure_guild(interaction.guild_id)
+        updates = {"automod_badwords": enabled}
+        if action is not None:
+            updates["automod_badwords_action"] = action
+        await db.set_guild(interaction.guild_id, **updates)
+        act_str = f" with action `{action}`" if action else ""
+        await interaction.response.send_message(
+            embed=success("Bad Word Filter Updated", f"Filter is now **{'Enabled' if enabled else 'Disabled'}**{act_str}."),
+            ephemeral=True
+        )
 
     @set_automod.command(name="add_badword", description="Add a word to the bad word filter.")
     @is_admin()
@@ -384,6 +505,36 @@ class Settings(commands.Cog):
         words.remove(word.lower())
         await db.set_guild(interaction.guild_id, automod_badwords_list=words)
         await interaction.response.send_message(embed=success("Word Removed", f"`{word}` removed from the filter."), ephemeral=True)
+
+    @set_automod.command(name="whitelist_role", description="Add or remove a role from AutoMod exemption.")
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Add", value="add"),
+        app_commands.Choice(name="Remove", value="remove")
+    ])
+    @is_admin()
+    async def whitelist_role(self, interaction: discord.Interaction, action: str, role: discord.Role):
+        await db.ensure_guild(interaction.guild_id)
+        if action == "add":
+            await db.add_automod_whitelist_role(interaction.guild_id, role.id)
+            await interaction.response.send_message(embed=success("Whitelist Role Added", f"{role.mention} is now exempt from AutoMod."), ephemeral=True)
+        else:
+            await db.remove_automod_whitelist_role(interaction.guild_id, role.id)
+            await interaction.response.send_message(embed=success("Whitelist Role Removed", f"{role.mention} is no longer exempt from AutoMod."), ephemeral=True)
+
+    @set_automod.command(name="whitelist_channel", description="Add or remove a channel from AutoMod exemption.")
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Add", value="add"),
+        app_commands.Choice(name="Remove", value="remove")
+    ])
+    @is_admin()
+    async def whitelist_channel(self, interaction: discord.Interaction, action: str, channel: discord.TextChannel):
+        await db.ensure_guild(interaction.guild_id)
+        if action == "add":
+            await db.add_automod_whitelist_channel(interaction.guild_id, channel.id)
+            await interaction.response.send_message(embed=success("Whitelist Channel Added", f"{channel.mention} is now exempt from AutoMod."), ephemeral=True)
+        else:
+            await db.remove_automod_whitelist_channel(interaction.guild_id, channel.id)
+            await interaction.response.send_message(embed=success("Whitelist Channel Removed", f"{channel.mention} is no longer exempt from AutoMod."), ephemeral=True)
 
     @set_automod.command(name="log_channel", description="Set the auto-mod log channel.")
     @is_admin()

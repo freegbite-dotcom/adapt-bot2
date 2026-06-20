@@ -7,13 +7,39 @@ log = logging.getLogger("db")
 _pool: asyncpg.Pool | None = None
 
 
-# ── Pool ──────────────────────────────────────────────────────────────────────
-
 async def create_pool() -> asyncpg.Pool:
     global _pool
     _pool = await asyncpg.create_pool(dsn=config.DATABASE_URL, min_size=1, max_size=5, command_timeout=60)
     log.info("✅  Database pool created")
+    
+    # Auto-migrate database schema for customizable AutoMod
+    try:
+        async with _pool.acquire() as conn:
+            await conn.execute("""
+                ALTER TABLE guild_settings 
+                ADD COLUMN IF NOT EXISTS automod_spam_count INT DEFAULT 5,
+                ADD COLUMN IF NOT EXISTS automod_spam_interval INT DEFAULT 5,
+                ADD COLUMN IF NOT EXISTS automod_spam_action VARCHAR(20) DEFAULT 'timeout',
+                ADD COLUMN IF NOT EXISTS automod_links_action VARCHAR(20) DEFAULT 'delete',
+                ADD COLUMN IF NOT EXISTS automod_invites BOOLEAN DEFAULT FALSE,
+                ADD COLUMN IF NOT EXISTS automod_invites_action VARCHAR(20) DEFAULT 'delete',
+                ADD COLUMN IF NOT EXISTS automod_badwords_action VARCHAR(20) DEFAULT 'delete',
+                ADD COLUMN IF NOT EXISTS automod_mentions BOOLEAN DEFAULT FALSE,
+                ADD COLUMN IF NOT EXISTS automod_mentions_limit INT DEFAULT 5,
+                ADD COLUMN IF NOT EXISTS automod_mentions_action VARCHAR(20) DEFAULT 'delete',
+                ADD COLUMN IF NOT EXISTS automod_whitelist_roles BIGINT[] DEFAULT '{}',
+                ADD COLUMN IF NOT EXISTS automod_whitelist_channels BIGINT[] DEFAULT '{}';
+            """)
+            log.info("✅  Database schema auto-migrated successfully")
+    except Exception as e:
+        log.warning(f"⚠️  Database schema auto-migration warning: {e}")
+        
     return _pool
+
+
+# ── Pool ──────────────────────────────────────────────────────────────────────
+
+
 
 async def close_pool():
     global _pool
@@ -29,12 +55,36 @@ def get_pool() -> asyncpg.Pool:
 
 # ── Guild Settings ────────────────────────────────────────────────────────────
 
-async def get_guild(guild_id: int) -> asyncpg.Record | None:
+AUTOMOD_DEFAULTS = {
+    "automod_spam_count": 5,
+    "automod_spam_interval": 5,
+    "automod_spam_action": "timeout",
+    "automod_links_action": "delete",
+    "automod_invites": False,
+    "automod_invites_action": "delete",
+    "automod_badwords_action": "delete",
+    "automod_mentions": False,
+    "automod_mentions_limit": 5,
+    "automod_mentions_action": "delete",
+    "automod_whitelist_roles": [],
+    "automod_whitelist_channels": []
+}
+
+async def get_guild(guild_id: int) -> dict | None:
     if _pool is None:
         return None
-    return await get_pool().fetchrow("SELECT * FROM guild_settings WHERE guild_id = $1", guild_id)
+    row = await get_pool().fetchrow("SELECT * FROM guild_settings WHERE guild_id = $1", guild_id)
+    if not row:
+        return None
+    
+    # Merge row with default settings so that missing keys don't trigger KeyError
+    data = dict(row)
+    for k, v in AUTOMOD_DEFAULTS.items():
+        if k not in data or data[k] is None:
+            data[k] = v
+    return data
 
-async def ensure_guild(guild_id: int) -> asyncpg.Record:
+async def ensure_guild(guild_id: int) -> dict:
     """Get guild settings, creating a default row if it doesn't exist."""
     row = await get_guild(guild_id)
     if not row:
@@ -244,6 +294,39 @@ async def add_automod_log(guild_id, user_id, rule, content=None, action_taken=No
         "INSERT INTO automod_logs (guild_id, user_id, rule, content, action_taken) VALUES ($1,$2,$3,$4,$5)",
         guild_id, user_id, rule, content, action_taken
     )
+
+async def add_automod_whitelist_role(guild_id: int, role_id: int) -> None:
+    if _pool is None:
+        return
+    await get_pool().execute(
+        "UPDATE guild_settings SET automod_whitelist_roles = array_append(COALESCE(automod_whitelist_roles, ARRAY[]::BIGINT[]), $2) WHERE guild_id = $1",
+        guild_id, role_id
+    )
+
+async def remove_automod_whitelist_role(guild_id: int, role_id: int) -> None:
+    if _pool is None:
+        return
+    await get_pool().execute(
+        "UPDATE guild_settings SET automod_whitelist_roles = array_remove(COALESCE(automod_whitelist_roles, ARRAY[]::BIGINT[]), $2) WHERE guild_id = $1",
+        guild_id, role_id
+    )
+
+async def add_automod_whitelist_channel(guild_id: int, channel_id: int) -> None:
+    if _pool is None:
+        return
+    await get_pool().execute(
+        "UPDATE guild_settings SET automod_whitelist_channels = array_append(COALESCE(automod_whitelist_channels, ARRAY[]::BIGINT[]), $2) WHERE guild_id = $1",
+        guild_id, channel_id
+    )
+
+async def remove_automod_whitelist_channel(guild_id: int, channel_id: int) -> None:
+    if _pool is None:
+        return
+    await get_pool().execute(
+        "UPDATE guild_settings SET automod_whitelist_channels = array_remove(COALESCE(automod_whitelist_channels, ARRAY[]::BIGINT[]), $2) WHERE guild_id = $1",
+        guild_id, channel_id
+    )
+
 
 
 # ── Giveaways ─────────────────────────────────────────────────────────────────
